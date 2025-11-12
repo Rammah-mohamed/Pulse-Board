@@ -1,9 +1,11 @@
+export type ColumnKey = "todo" | "in-progress" | "done";
+
 export type Task = {
 	id: string;
 	title: string;
 	description?: string;
-	column: "todo" | "in-progress" | "done";
+	column: ColumnKey;
+	position: number;
 	createdAt: string;
 	updatedAt?: string;
-	senderID?: string;
 };
