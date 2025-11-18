@@ -1,82 +1,83 @@
-// client/src/hooks/useSocket.ts
-import { useEffect, useRef } from "react";
-import { io, Socket } from "socket.io-client";
+import { useEffect } from "react";
 import type { Task } from "../shared/types";
 import { useBoardStore } from "../store/boardStore";
-
-type ServerToClientEvents = {
-	"task:added": (task: Task) => void;
-	"tasks:initial": (tasks: Task[]) => void;
-	"task:moved": (payload: { task: Task }) => void;
-	"task:updated": (payload: { task: Task }) => void;
-};
-
-type ClientToServerEvents = {
-	"task:add": (task: Partial<Task> & { id: string }) => void;
-	"tasks:fetch": () => void;
-	"task:move": (payload: { id: string; toColumn: Task["column"]; toPosition: number }) => void;
-	"task:update": (payload: { id: string; title?: string; description?: string }) => void;
-};
+import { socket } from "../lib/socket"; // <-- singleton socket
 
 export function useSocket() {
-	const socketRef = useRef<Socket<ServerToClientEvents, ClientToServerEvents> | null>(null);
 	const setTasks = useBoardStore((s) => s.setTasks);
 	const addTask = useBoardStore((s) => s.addTask);
 	const applyAuthoritativeTask = useBoardStore((s) => s.applyAuthoritativeTask);
 
 	useEffect(() => {
-		const socket = io(import.meta.env.VITE_SERVER_ORIGIN || "http://localhost:4000", {
-			transports: ["websocket"],
-			autoConnect: true,
+		console.log("[socket] hook mounted");
+
+		// ---------------------------------------------------
+		// 🧼 Remove previous event listeners (CRITICAL)
+		// ---------------------------------------------------
+		socket.off("tasks:initial");
+		socket.off("task:added");
+		socket.off("task:moved");
+		socket.off("task:updated");
+
+		// ---------------------------------------------------
+		// 🧼 Remove connection listeners to avoid duplicates
+		// ---------------------------------------------------
+		socket.off("connect");
+		socket.off("disconnect");
+
+		// ---------------------------------------------------
+		// 🟢 Register listeners exactly once
+		// ---------------------------------------------------
+		socket.on("connect", () => {
+			console.log("[socket] connected:", socket.id);
 		});
 
-		socketRef.current = socket;
-
-		socket.on("connect", () => {
-			console.log("[socket] connected", socket.id);
-			socket.emit("tasks:fetch");
+		socket.on("disconnect", (reason) => {
+			console.log("[socket] disconnected:", reason);
 		});
 
 		socket.on("tasks:initial", (tasks) => {
+			console.log("[socket] tasks:initial received", tasks.length);
 			setTasks(tasks);
 		});
 
 		socket.on("task:added", (task) => {
+			console.log("[socket] task:added", task.id);
 			addTask(task);
 		});
 
 		socket.on("task:moved", ({ task }) => {
+			console.log("[socket] task:moved", task.id);
 			applyAuthoritativeTask(task);
 		});
 
 		socket.on("task:updated", ({ task }) => {
+			console.log("[socket] task:updated", task.id);
 			applyAuthoritativeTask(task);
 		});
 
-		socket.on("disconnect", (reason) => {
-			console.log("[socket] disconnected", reason);
-		});
+		// ---------------------------------------------------
+		// 🟡 Fetch tasks ONLY once (not on connect!)
+		// ---------------------------------------------------
+		console.log("[socket] fetching initial tasks…");
+		socket.emit("tasks:fetch");
 
-		socket.on("error", (err) => {
-			console.error("[socket] error", err);
-		});
-
-		return () => {
-			socket.disconnect();
-			socketRef.current = null;
-		};
+		// No cleanup needed — socket is global/singleton
 	}, [setTasks, addTask, applyAuthoritativeTask]);
 
+	// ---------------------------------------------------
+	// ✨ Emitters
+	// ---------------------------------------------------
 	const emitAddTask = (task: Partial<Task> & { id: string }) => {
-		socketRef.current?.emit("task:add", task);
+		socket.emit("task:add", task);
 	};
 
 	const emitMoveTask = (payload: { id: string; toColumn: Task["column"]; toPosition: number }) => {
-		socketRef.current?.emit("task:move", payload);
+		socket.emit("task:move", payload);
 	};
 
 	const emitUpdateTask = (payload: { id: string; title?: string; description?: string }) => {
-		socketRef.current?.emit("task:update", payload);
+		socket.emit("task:update", payload);
 	};
 
 	return {

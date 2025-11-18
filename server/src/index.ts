@@ -93,28 +93,49 @@ io.on("connection", (socket: Socket) => {
 
 	// Move a task (client optimistic; server authoritative)
 	// Payload: { id, toColumn, toPosition, movedBy (optional) }
-	socket.on("task:move", (payload: { id: string; toColumn: ColumnKey; toPosition: number }) => {
-		const { id, toColumn, toPosition } = payload;
-		const t = tasks.find((x) => x.id === id);
-		if (!t) {
-			socket.emit("error", { message: "Task not found" });
-			return;
+	socket.on("task:move", ({ id, toColumn, toPosition }) => {
+		try {
+			// 1️⃣ Find the task index
+			const taskIndex = tasks.findIndex((t) => t.id === id);
+			if (taskIndex === -1) {
+				console.warn(`task:move → task not found: ${id}`);
+				return;
+			}
+
+			// 2️⃣ Extract the task
+			const task = tasks.splice(taskIndex, 1)[0]; // remove from tasks
+			if (!task) return;
+
+			// 3️⃣ Update column
+			task.column = toColumn;
+
+			// 4️⃣ Get current tasks in the destination column
+			const columnTasks = tasks
+				.filter((t) => t.column === toColumn)
+				.sort((a, b) => a.position - b.position);
+
+			// 5️⃣ Clamp toPosition
+			const safeIndex = Math.max(0, Math.min(toPosition, columnTasks.length));
+
+			// 6️⃣ Insert task at safeIndex
+			columnTasks.splice(safeIndex, 0, task);
+
+			// 7️⃣ Normalize positions
+			columnTasks.forEach((t, idx) => (t.position = idx));
+
+			// 8️⃣ Rebuild global tasks array
+			tasks = [...tasks.filter((t) => t.column !== toColumn), ...columnTasks];
+
+			// 9️⃣ Update timestamp
+			task.updatedAt = new Date().toISOString();
+
+			// 🔟 Emit authoritative task to frontend
+			io.emit("task:moved", { task });
+
+			console.log("🔁 task moved:", task.id);
+		} catch (err) {
+			console.error("❌ task:move error", err);
 		}
-
-		// Remove from old column by collapsing positions
-		const oldColumn = t.column;
-		// set to new column & temporary position
-		t.column = toColumn;
-		t.position = toPosition;
-
-		// After setting, we need to re-normalize positions in both affected columns
-		normalizePositionsForColumn(oldColumn);
-		normalizePositionsForColumn(toColumn);
-
-		t.updatedAt = new Date().toISOString();
-
-		// Broadcast authoritative moved event (full task payload)
-		io.emit("task:moved", { task: t });
 	});
 
 	// Update a task (title/description)

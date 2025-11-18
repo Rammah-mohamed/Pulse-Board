@@ -34,8 +34,12 @@ export const AddTaskForm: React.FC = () => {
 			createdAt: new Date().toISOString(),
 		};
 
+		// Optimistic UI update
 		addTaskLocally(newTask);
+
+		// Notify server
 		emitAddTask(newTask);
+
 		setTitle("");
 	};
 

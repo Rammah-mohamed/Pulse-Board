@@ -1,0 +1,21 @@
+import type { Task } from "@/shared/types";
+import { io, Socket } from "socket.io-client";
+
+type ServerToClientEvents = {
+	"task:added": (task: Task) => void;
+	"tasks:initial": (tasks: Task[]) => void;
+	"task:moved": (payload: { task: Task }) => void;
+	"task:updated": (payload: { task: Task }) => void;
+};
+
+type ClientToServerEvents = {
+	"task:add": (task: Partial<Task> & { id: string }) => void;
+	"tasks:fetch": () => void;
+	"task:move": (payload: { id: string; toColumn: Task["column"]; toPosition: number }) => void;
+	"task:update": (payload: { id: string; title?: string; description?: string }) => void;
+};
+
+export const socket: Socket<ServerToClientEvents, ClientToServerEvents> = io(
+	import.meta.env.VITE_SERVER_ORIGIN || "http://localhost:4000",
+	{ transports: ["websocket"], autoConnect: true }
+);

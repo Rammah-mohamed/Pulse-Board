@@ -28,8 +28,8 @@ export default function Board() {
 		const toColumn = destination.droppableId as ColumnKey;
 		const toPosition = destination.index;
 
-		moveTaskLocally(draggableId, toColumn, toPosition);
-		emitMoveTask({ id: draggableId, toColumn, toPosition });
+		moveTaskLocally(draggableId, toColumn, toPosition); // optimistic
+		emitMoveTask({ id: draggableId, toColumn, toPosition }); // server authoritative
 	};
 
 	return (

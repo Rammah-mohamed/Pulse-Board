@@ -7,62 +7,73 @@ type BoardState = {
 	setTasks: (tasks: Task[]) => void;
 	addTask: (task: Task) => void;
 	moveTaskLocally: (id: string, toColumn: ColumnKey, toPosition: number) => void;
-	applyAuthoritativeTask: (task: Task) => void; // server confirms
+	applyAuthoritativeTask: (task: Task) => void;
 	updateTaskLocally: (id: string, fields: Partial<Task>) => void;
 };
 
 export const useBoardStore = create<BoardState>((set) => ({
 	tasks: [],
+
 	setTasks: (tasks) => set({ tasks }),
-	addTask: (task) => set((s) => ({ tasks: [...s.tasks, task] })),
-	moveTaskLocally: (id, toColumn, toPosition) => {
+
+	addTask: (task) =>
 		set((state) => {
-			// optimistic reordering
-			const tasks = state.tasks.map((t) => ({ ...t }));
-			const task = tasks.find((x) => x.id === id);
-			if (!task) return { tasks };
+			const exists = state.tasks.some((t) => t.id === task.id);
+			if (exists) {
+				// update instead of duplicating (idempotent)
+				return {
+					tasks: state.tasks.map((t) => (t.id === task.id ? { ...t, ...task } : t)),
+				};
+			}
+			return { tasks: [...state.tasks, task] };
+		}),
 
-			const fromColumn = task.column;
-			// remove task from its current spot
-			const oldColumnTasks = tasks
-				.filter((t) => t.column === fromColumn && t.id !== id)
-				.sort((a, b) => a.position - b.position);
+	moveTaskLocally: (id, toColumn, toPosition) =>
+		set((state) => {
+			// 1️⃣ Find the task
+			const taskIndex = state.tasks.findIndex((t) => t.id === id);
+			if (taskIndex === -1) return state;
 
-			// reassign positions for old column
-			oldColumnTasks.forEach((t, idx) => (t.position = idx));
+			// 2️⃣ Remove task from its current location
+			const task = { ...state.tasks[taskIndex] }; // clone to avoid mutation
+			const remainingTasks = state.tasks.filter((t) => t.id !== id);
 
-			// insert into target column at toPosition
+			// 3️⃣ Update column
 			task.column = toColumn;
-			const targetColumnTasks = tasks
-				.filter((t) => t.column === toColumn && t.id !== id)
+
+			// 4️⃣ Get current tasks in the target column
+			const columnTasks = remainingTasks
+				.filter((t) => t.column === toColumn)
 				.sort((a, b) => a.position - b.position);
 
-			// clamp toPosition
-			const pos = Math.max(0, Math.min(toPosition, targetColumnTasks.length));
-			targetColumnTasks.splice(pos, 0, task);
+			// 5️⃣ Clamp toPosition
+			const safeIndex = Math.max(0, Math.min(toPosition, columnTasks.length));
 
-			// reassign positions in target column
-			targetColumnTasks.forEach((t, idx) => (t.position = idx));
+			// 6️⃣ Insert task at safeIndex
+			columnTasks.splice(safeIndex, 0, task);
 
-			// build new tasks array
-			const remainingOtherTasks = tasks.filter(
-				(t) => t.id !== id && t.column !== fromColumn && t.column !== toColumn
-			);
-			const combined = [...remainingOtherTasks, ...oldColumnTasks, ...targetColumnTasks];
+			// 7️⃣ Normalize positions
+			columnTasks.forEach((t, idx) => (t.position = idx));
 
-			return { tasks: combined };
-		});
-	},
-	applyAuthoritativeTask: (task) => {
+			// 8️⃣ Rebuild full task array
+			const newTasks = [...remainingTasks.filter((t) => t.column !== toColumn), ...columnTasks];
+
+			return { tasks: newTasks };
+		}),
+
+	applyAuthoritativeTask: (task) =>
 		set((state) => {
-			// remove any previous copy
-			const others = state.tasks.filter((t) => t.id !== task.id);
-			return { tasks: [...others, task] };
-		});
-	},
-	updateTaskLocally: (id, fields) => {
+			const exists = state.tasks.some((t) => t.id === task.id);
+			if (exists) {
+				return {
+					tasks: state.tasks.map((t) => (t.id === task.id ? { ...t, ...task } : t)),
+				};
+			}
+			return { tasks: [...state.tasks, task] };
+		}),
+
+	updateTaskLocally: (id, fields) =>
 		set((state) => ({
 			tasks: state.tasks.map((t) => (t.id === id ? { ...t, ...fields } : t)),
-		}));
-	},
+		})),
 }));

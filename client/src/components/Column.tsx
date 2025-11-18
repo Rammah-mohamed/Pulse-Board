@@ -14,8 +14,8 @@ export default function Column({ id, title, tasks }: { id: string; title: string
 						{...provided.droppableProps}
 						className="space-y-2 min-h-[300px]"
 					>
-						{tasks.map((t, index) => (
-							<TaskCard key={t.id} task={t} index={index} />
+						{tasks.map((t) => (
+							<TaskCard key={t.id} task={t} index={t.position} />
 						))}
 						{provided.placeholder}
 						{tasks.length === 0 && (
