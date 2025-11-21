@@ -3,6 +3,7 @@ import express from "express";
 import http from "http";
 import { Server as IOServer, Socket } from "socket.io";
 import cors from "cors";
+import Database from "better-sqlite3";
 import { v4 as uuidv4 } from "uuid";
 
 type ColumnKey = "todo" | "in-progress" | "done";
@@ -12,7 +13,7 @@ type Task = {
 	title: string;
 	description?: string;
 	column: ColumnKey;
-	position: number; // numeric ordering within column (smaller -> top)
+	position: number;
 	createdAt: string;
 	updatedAt?: string;
 };
@@ -22,142 +23,153 @@ app.use(cors());
 app.use(express.json());
 
 const server = http.createServer(app);
-const io = new IOServer(server, {
-	cors: { origin: "*" },
-});
-
+const io = new IOServer(server, { cors: { origin: "*" } });
 const PORT = process.env.PORT || 4000;
 
-// initial tasks with positions
-let tasks: Task[] = [
-	{
-		id: "t-1",
-		title: "Welcome to PulseBoard",
-		description: "Drag me across columns",
-		column: "todo",
-		position: 0,
-		createdAt: new Date().toISOString(),
-	},
-	{
-		id: "t-2",
-		title: "Set up Phase 2",
-		description: "Drag & drop + optimistic updates",
-		column: "todo",
-		position: 1,
-		createdAt: new Date().toISOString(),
-	},
-];
+// --- Initialize SQLite ---
+const db = new Database("pulseboard.db");
 
-function normalizePositionsForColumn(column: ColumnKey) {
-	const columnTasks = tasks
-		.filter((t) => t.column === column)
-		.sort((a, b) => a.position - b.position);
-	columnTasks.forEach((t, idx) => (t.position = idx));
+// Create tasks table if not exists
+db.prepare(
+	`
+  CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    description TEXT,
+    column TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT
+  )
+`
+).run();
+
+// --- Normalize positions helper ---
+function normalizePositions(column: ColumnKey) {
+	const tasks: Task[] = db
+		.prepare(`SELECT * FROM tasks WHERE column = @column ORDER BY position ASC`)
+		.all({ column });
+
+	tasks.forEach((t, idx) => {
+		db.prepare(`UPDATE tasks SET position = @position WHERE id = @id`).run({
+			position: idx,
+			id: t.id,
+		});
+	});
 }
 
-// Express endpoint
+// --- Express endpoint ---
 app.get("/api/tasks", (_req, res) => {
-	res.json(tasks.sort((a, b) => a.createdAt.localeCompare(b.createdAt)));
+	const tasks: Task[] = db.prepare(`SELECT * FROM tasks ORDER BY createdAt ASC`).all();
+	res.json(tasks);
 });
 
+// --- Socket.IO ---
 io.on("connection", (socket: Socket) => {
-	console.log(`Socket connected: ${socket.id}`);
+	console.log("Socket connected:", socket.id);
 
 	socket.on("tasks:fetch", () => {
+		const tasks: Task[] = db.prepare(`SELECT * FROM tasks ORDER BY position ASC`).all();
 		socket.emit("tasks:initial", tasks);
 	});
 
-	// Add a new task
+	// Add task
 	socket.on("task:add", (payload: Partial<Task> & { id: string }) => {
-		if (!payload || !payload.id || !payload.title) {
-			socket.emit("error", { message: "Invalid task payload" });
-			return;
-		}
+		if (!payload.id || !payload.title) return socket.emit("error", { message: "Invalid task" });
 
 		const column = (payload.column as ColumnKey) || "todo";
-		// position at the end of column
-		const pos = tasks.filter((t) => t.column === column).length;
+
+		const countResult = db
+			.prepare(`SELECT COUNT(*) as c FROM tasks WHERE column = @column`)
+			.get({ column }) as { c: number };
 
 		const newTask: Task = {
 			id: payload.id,
 			title: payload.title,
 			description: payload.description || "",
 			column,
-			position: pos,
+			position: countResult.c,
 			createdAt: new Date().toISOString(),
 		};
 
-		tasks.push(newTask);
+		db.prepare(
+			`
+      INSERT INTO tasks (id, title, description, column, position, createdAt)
+      VALUES (@id, @title, @description, @column, @position, @createdAt)
+    `
+		).run(newTask);
+
 		io.emit("task:added", newTask);
 	});
 
-	// Move a task (client optimistic; server authoritative)
-	// Payload: { id, toColumn, toPosition, movedBy (optional) }
-	socket.on("task:move", ({ id, toColumn, toPosition }) => {
-		try {
-			// 1️⃣ Find the task index
-			const taskIndex = tasks.findIndex((t) => t.id === id);
-			if (taskIndex === -1) {
-				console.warn(`task:move → task not found: ${id}`);
-				return;
-			}
+	// Move task
+	socket.on(
+		"task:move",
+		({ id, toColumn, toPosition }: { id: string; toColumn: ColumnKey; toPosition: number }) => {
+			const task: Task | undefined = db.prepare(`SELECT * FROM tasks WHERE id = @id`).get({ id });
 
-			// 2️⃣ Extract the task
-			const task = tasks.splice(taskIndex, 1)[0]; // remove from tasks
 			if (!task) return;
 
-			// 3️⃣ Update column
 			task.column = toColumn;
 
-			// 4️⃣ Get current tasks in the destination column
-			const columnTasks = tasks
-				.filter((t) => t.column === toColumn)
-				.sort((a, b) => a.position - b.position);
+			// Get other tasks in the column
+			const columnTasks: Task[] = db
+				.prepare(`SELECT * FROM tasks WHERE column = @column AND id != @id ORDER BY position ASC`)
+				.all({ column: toColumn, id });
 
-			// 5️⃣ Clamp toPosition
 			const safeIndex = Math.max(0, Math.min(toPosition, columnTasks.length));
-
-			// 6️⃣ Insert task at safeIndex
 			columnTasks.splice(safeIndex, 0, task);
 
-			// 7️⃣ Normalize positions
-			columnTasks.forEach((t, idx) => (t.position = idx));
+			// Update positions in DB
+			columnTasks.forEach((t, idx) => {
+				db.prepare(`UPDATE tasks SET position = @position, column = @column WHERE id = @id`).run({
+					position: idx,
+					column: t.column,
+					id: t.id,
+				});
+			});
 
-			// 8️⃣ Rebuild global tasks array
-			tasks = [...tasks.filter((t) => t.column !== toColumn), ...columnTasks];
+			task.updatedAt = new Date().toISOString();
+			db.prepare(
+				`UPDATE tasks SET column = @column, position = @position, updatedAt = @updatedAt WHERE id = @id`
+			).run({
+				column: task.column,
+				position: safeIndex,
+				updatedAt: task.updatedAt,
+				id: task.id,
+			});
 
-			// 9️⃣ Update timestamp
+			io.emit("task:moved", { task });
+		}
+	);
+
+	// Update task
+	socket.on(
+		"task:update",
+		({ id, title, description }: { id: string; title?: string; description?: string }) => {
+			const task: Task | undefined = db.prepare(`SELECT * FROM tasks WHERE id = @id`).get({ id });
+			if (!task) return;
+
+			if (title) task.title = title;
+			if (description) task.description = description;
 			task.updatedAt = new Date().toISOString();
 
-			// 🔟 Emit authoritative task to frontend
-			io.emit("task:moved", { task });
+			db.prepare(
+				`UPDATE tasks SET title = @title, description = @description, updatedAt = @updatedAt WHERE id = @id`
+			).run({
+				title: task.title,
+				description: task.description,
+				updatedAt: task.updatedAt,
+				id: task.id,
+			});
 
-			console.log("🔁 task moved:", task.id);
-		} catch (err) {
-			console.error("❌ task:move error", err);
+			io.emit("task:updated", { task });
 		}
-	});
+	);
 
-	// Update a task (title/description)
-	socket.on("task:update", (payload: { id: string; title?: string; description?: string }) => {
-		const { id, title, description } = payload;
-		const t = tasks.find((x) => x.id === id);
-		if (!t) {
-			socket.emit("error", { message: "Task not found" });
-			return;
-		}
-		if (typeof title === "string") t.title = title;
-		if (typeof description === "string") t.description = description;
-		t.updatedAt = new Date().toISOString();
-
-		io.emit("task:updated", { task: t });
-	});
-
-	socket.on("disconnect", (reason) => {
-		console.log(`Socket disconnected: ${socket.id} reason: ${reason}`);
-	});
+	socket.on("disconnect", (reason) =>
+		console.log(`Socket disconnected: ${socket.id} reason: ${reason}`)
+	);
 });
 
-server.listen(PORT, () => {
-	console.log(`Server listening on port ${PORT}`);
-});
+server.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
