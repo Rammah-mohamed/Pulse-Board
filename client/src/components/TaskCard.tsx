@@ -1,26 +1,38 @@
-// src/components/board/TaskCard.tsx
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Draggable } from "@hello-pangea/dnd";
+import { IconPencil, IconCheck, IconX } from "@tabler/icons-react";
 import type { Task } from "@/shared/types";
 import { useSocket } from "@/hooks/useSocket";
 import { useBoardStore } from "@/store/boardStore";
-import { IconPencil } from "@tabler/icons-react";
 
-export default function TaskCard({ task, index }: { task: Task; index: number }) {
-	const { emitUpdateTask } = useSocket();
-	const updateLocally = useBoardStore((s) => s.updateTaskLocally);
+interface TaskCardProps {
+	task: Task;
+	index: number;
+}
+
+export default function TaskCard({ task, index }: TaskCardProps) {
 	const [editing, setEditing] = useState(false);
 	const [title, setTitle] = useState(task.title);
+	const inputRef = useRef<HTMLInputElement>(null);
+
+	const { emitUpdateTask } = useSocket();
+	const updateTaskLocally = useBoardStore((s) => s.updateTaskLocally);
 
 	const save = () => {
-		if (title.trim() === task.title) {
+		const trimmed = title.trim();
+		if (!trimmed || trimmed === task.title) {
 			setEditing(false);
+			setTitle(task.title);
 			return;
 		}
-		updateLocally(task.id, { title: title.trim() });
-		emitUpdateTask({ id: task.id, title: title.trim() });
+		updateTaskLocally(task.id, { title: trimmed });
+		emitUpdateTask({ id: task.id, title: trimmed });
 		setEditing(false);
 	};
+
+	useEffect(() => {
+		if (editing) inputRef.current?.focus();
+	}, [editing]);
 
 	return (
 		<Draggable draggableId={task.id} index={index}>
@@ -29,13 +41,14 @@ export default function TaskCard({ task, index }: { task: Task; index: number })
 					ref={provided.innerRef}
 					{...provided.draggableProps}
 					{...provided.dragHandleProps}
-					className={`p-3 bg-white border border-gray-200 rounded-xl shadow-sm transition 
-          ${snapshot.isDragging ? "ring-2 ring-blue-400 ring-offset-1" : ""}`}
+					className={`p-3 bg-white border border-gray-200 rounded-xl shadow-sm transition
+            ${snapshot.isDragging ? "ring-2 ring-blue-400 ring-offset-1" : ""}
+            hover:shadow-md`}
 				>
 					{editing ? (
 						<div className="flex gap-2">
 							<input
-								className="border rounded px-2 py-1 flex-1 text-sm"
+								ref={inputRef}
 								value={title}
 								onChange={(e) => setTitle(e.target.value)}
 								onKeyDown={(e) => {
@@ -45,9 +58,19 @@ export default function TaskCard({ task, index }: { task: Task; index: number })
 										setTitle(task.title);
 									}
 								}}
+								className="border px-2 py-1 rounded flex-1 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400"
 							/>
-							<button className="text-sm text-blue-600 font-medium hover:underline" onClick={save}>
-								Save
+							<button onClick={save} className="text-blue-600 hover:underline">
+								<IconCheck size={16} />
+							</button>
+							<button
+								onClick={() => {
+									setEditing(false);
+									setTitle(task.title);
+								}}
+								className="text-gray-400 hover:text-red-500"
+							>
+								<IconX size={16} />
 							</button>
 						</div>
 					) : (
@@ -59,8 +82,8 @@ export default function TaskCard({ task, index }: { task: Task; index: number })
 								</div>
 							</div>
 							<button
-								className="text-gray-400 hover:text-blue-600 transition"
 								onClick={() => setEditing(true)}
+								className="text-gray-400 hover:text-blue-600 transition"
 								aria-label={`Edit ${task.title}`}
 							>
 								<IconPencil size={16} />

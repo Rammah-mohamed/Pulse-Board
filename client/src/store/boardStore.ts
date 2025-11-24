@@ -1,62 +1,75 @@
 // client/src/store/boardStore.ts
 import { create } from "zustand";
 import type { Task, ColumnKey } from "../shared/types";
+import {
+	saveTask,
+	saveTasks,
+	getAllTasks,
+	enqueue as persistEnqueue,
+	getQueue,
+} from "@/local-db/indexedDB";
+
+type QueueItem =
+	| { type: "add"; task: Task }
+	| { type: "move"; payload: { id: string; toColumn: ColumnKey; toPosition: number } }
+	| { type: "update"; payload: { id: string; fields: Partial<Task> } };
 
 type BoardState = {
 	tasks: Task[];
+	queue: QueueItem[]; // in-memory mirror of persisted queue (optional)
 	setTasks: (tasks: Task[]) => void;
 	addTask: (task: Task) => void;
 	moveTaskLocally: (id: string, toColumn: ColumnKey, toPosition: number) => void;
 	applyAuthoritativeTask: (task: Task) => void;
 	updateTaskLocally: (id: string, fields: Partial<Task>) => void;
+	enqueueAction: (action: QueueItem) => Promise<void>;
+	flushLocalQueueToMemory: () => Promise<void>;
+	hydrateFromIndexedDB: () => Promise<void>;
 };
 
-export const useBoardStore = create<BoardState>((set) => ({
+export const useBoardStore = create<BoardState>((set, _get) => ({
 	tasks: [],
+	queue: [],
 
-	setTasks: (tasks) => set({ tasks }),
+	setTasks: (tasks) => {
+		set({ tasks });
+		// persist snapshot (fire-and-forget)
+		saveTasks(tasks).catch((e) => console.error("saveTasks error", e));
+	},
 
 	addTask: (task) =>
 		set((state) => {
 			const exists = state.tasks.some((t) => t.id === task.id);
-			if (exists) {
-				// update instead of duplicating (idempotent)
-				return {
-					tasks: state.tasks.map((t) => (t.id === task.id ? { ...t, ...task } : t)),
-				};
-			}
-			return { tasks: [...state.tasks, task] };
+			const tasks = exists
+				? state.tasks.map((t) => (t.id === task.id ? { ...t, ...task } : t))
+				: [...state.tasks, task];
+			// persist
+			saveTask(task).catch((e) => console.error("saveTask error", e));
+			return { tasks };
 		}),
 
 	moveTaskLocally: (id, toColumn, toPosition) =>
 		set((state) => {
-			// 1️⃣ Find the task
 			const taskIndex = state.tasks.findIndex((t) => t.id === id);
 			if (taskIndex === -1) return state;
 
-			// 2️⃣ Remove task from its current location
-			const task = { ...state.tasks[taskIndex] }; // clone to avoid mutation
+			const task = { ...state.tasks[taskIndex] };
 			const remainingTasks = state.tasks.filter((t) => t.id !== id);
 
-			// 3️⃣ Update column
 			task.column = toColumn;
 
-			// 4️⃣ Get current tasks in the target column
 			const columnTasks = remainingTasks
 				.filter((t) => t.column === toColumn)
 				.sort((a, b) => a.position - b.position);
 
-			// 5️⃣ Clamp toPosition
 			const safeIndex = Math.max(0, Math.min(toPosition, columnTasks.length));
-
-			// 6️⃣ Insert task at safeIndex
 			columnTasks.splice(safeIndex, 0, task);
-
-			// 7️⃣ Normalize positions
 			columnTasks.forEach((t, idx) => (t.position = idx));
 
-			// 8️⃣ Rebuild full task array
 			const newTasks = [...remainingTasks.filter((t) => t.column !== toColumn), ...columnTasks];
+
+			// persist moved task and any changed positions (optimistic)
+			saveTasks(newTasks).catch((e) => console.error("saveTasks error", e));
 
 			return { tasks: newTasks };
 		}),
@@ -64,16 +77,50 @@ export const useBoardStore = create<BoardState>((set) => ({
 	applyAuthoritativeTask: (task) =>
 		set((state) => {
 			const exists = state.tasks.some((t) => t.id === task.id);
-			if (exists) {
-				return {
-					tasks: state.tasks.map((t) => (t.id === task.id ? { ...t, ...task } : t)),
-				};
-			}
-			return { tasks: [...state.tasks, task] };
+			const tasks = exists
+				? state.tasks.map((t) => (t.id === task.id ? { ...t, ...task } : t))
+				: [...state.tasks, task];
+			// persist authoritative change
+			saveTask(task).catch((e) => console.error("saveTask error", e));
+			return { tasks };
 		}),
 
 	updateTaskLocally: (id, fields) =>
-		set((state) => ({
-			tasks: state.tasks.map((t) => (t.id === id ? { ...t, ...fields } : t)),
-		})),
+		set((state) => {
+			const tasks = state.tasks.map((t) => (t.id === id ? { ...t, ...fields } : t));
+			const updated = tasks.find((t) => t.id === id);
+			if (updated) saveTask(updated).catch((e) => console.error("saveTask error", e));
+			return { tasks };
+		}),
+
+	// queue persistence uses indexedDB via indexedDB.enqueue (persistEnqueue)
+	enqueueAction: async (action) => {
+		try {
+			await persistEnqueue(action as any);
+			// keep a light in-memory mirror
+			set((s) => ({ queue: [...s.queue, action] }));
+		} catch (err) {
+			console.error("enqueueAction error", err);
+		}
+	},
+
+	// helper: load queue from indexedDB into memory (used when reconnecting)
+	flushLocalQueueToMemory: async () => {
+		try {
+			const queued = await getQueue();
+			set({ queue: queued as any });
+		} catch (err) {
+			console.error("flushLocalQueueToMemory error", err);
+		}
+	},
+
+	// hydrate tasks from indexedDB on startup (if any)
+	hydrateFromIndexedDB: async () => {
+		try {
+			const tasks = await getAllTasks();
+			if (tasks && tasks.length) set({ tasks });
+		} catch (err) {
+			console.error("hydrateFromIndexedDB error", err);
+		}
+	},
 }));

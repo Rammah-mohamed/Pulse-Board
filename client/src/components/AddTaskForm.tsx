@@ -1,4 +1,3 @@
-// src/components/forms/AddTaskForm.tsx
 import React, { useState } from "react";
 import { v4 as uuidv4 } from "uuid";
 import { Button } from "@/components/ui/button";
@@ -18,28 +17,26 @@ import { IconPlus } from "@tabler/icons-react";
 export const AddTaskForm: React.FC = () => {
 	const [title, setTitle] = useState("");
 	const [column, setColumn] = useState<ColumnKey>("todo");
+
 	const { emitAddTask } = useSocket();
 	const addTaskLocally = useBoardStore((s) => s.addTask);
 
 	const handleSubmit = (e: React.FormEvent) => {
 		e.preventDefault();
-		if (!title.trim()) return;
+		const trimmed = title.trim();
+		if (!trimmed) return;
 
 		const newTask = {
 			id: uuidv4(),
-			title: title.trim(),
+			title: trimmed,
 			description: "",
 			column,
 			position: 0,
 			createdAt: new Date().toISOString(),
 		};
 
-		// Optimistic UI update
 		addTaskLocally(newTask);
-
-		// Notify server
 		emitAddTask(newTask);
-
 		setTitle("");
 	};
 
