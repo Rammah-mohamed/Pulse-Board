@@ -12,16 +12,18 @@ import {
 type QueueItem =
 	| { type: "add"; task: Task }
 	| { type: "move"; payload: { id: string; toColumn: ColumnKey; toPosition: number } }
-	| { type: "update"; payload: { id: string; fields: Partial<Task> } };
+	| { type: "update"; payload: { id: string; fields: Partial<Task> } }
+	| { type: "delete"; payload: { id: string } };
 
 type BoardState = {
 	tasks: Task[];
-	queue: QueueItem[]; // in-memory mirror of persisted queue (optional)
+	queue: QueueItem[];
 	setTasks: (tasks: Task[]) => void;
 	addTask: (task: Task) => void;
 	moveTaskLocally: (id: string, toColumn: ColumnKey, toPosition: number) => void;
 	applyAuthoritativeTask: (task: Task) => void;
 	updateTaskLocally: (id: string, fields: Partial<Task>) => void;
+	deleteTask: (id: string) => void;
 	enqueueAction: (action: QueueItem) => Promise<void>;
 	flushLocalQueueToMemory: () => Promise<void>;
 	hydrateFromIndexedDB: () => Promise<void>;
@@ -33,7 +35,6 @@ export const useBoardStore = create<BoardState>((set, _get) => ({
 
 	setTasks: (tasks) => {
 		set({ tasks });
-		// persist snapshot (fire-and-forget)
 		saveTasks(tasks).catch((e) => console.error("saveTasks error", e));
 	},
 
@@ -43,7 +44,6 @@ export const useBoardStore = create<BoardState>((set, _get) => ({
 			const tasks = exists
 				? state.tasks.map((t) => (t.id === task.id ? { ...t, ...task } : t))
 				: [...state.tasks, task];
-			// persist
 			saveTask(task).catch((e) => console.error("saveTask error", e));
 			return { tasks };
 		}),
@@ -68,7 +68,6 @@ export const useBoardStore = create<BoardState>((set, _get) => ({
 
 			const newTasks = [...remainingTasks.filter((t) => t.column !== toColumn), ...columnTasks];
 
-			// persist moved task and any changed positions (optimistic)
 			saveTasks(newTasks).catch((e) => console.error("saveTasks error", e));
 
 			return { tasks: newTasks };
@@ -80,7 +79,6 @@ export const useBoardStore = create<BoardState>((set, _get) => ({
 			const tasks = exists
 				? state.tasks.map((t) => (t.id === task.id ? { ...t, ...task } : t))
 				: [...state.tasks, task];
-			// persist authoritative change
 			saveTask(task).catch((e) => console.error("saveTask error", e));
 			return { tasks };
 		}),
@@ -93,18 +91,22 @@ export const useBoardStore = create<BoardState>((set, _get) => ({
 			return { tasks };
 		}),
 
-	// queue persistence uses indexedDB via indexedDB.enqueue (persistEnqueue)
+	deleteTask: (id) =>
+		set((state) => {
+			const tasks = state.tasks.filter((t) => t.id !== id);
+			saveTasks(tasks).catch((e) => console.error("saveTasks error", e));
+			return { tasks };
+		}),
+
 	enqueueAction: async (action) => {
 		try {
 			await persistEnqueue(action as any);
-			// keep a light in-memory mirror
 			set((s) => ({ queue: [...s.queue, action] }));
 		} catch (err) {
 			console.error("enqueueAction error", err);
 		}
 	},
 
-	// helper: load queue from indexedDB into memory (used when reconnecting)
 	flushLocalQueueToMemory: async () => {
 		try {
 			const queued = await getQueue();
@@ -114,7 +116,6 @@ export const useBoardStore = create<BoardState>((set, _get) => ({
 		}
 	},
 
-	// hydrate tasks from indexedDB on startup (if any)
 	hydrateFromIndexedDB: async () => {
 		try {
 			const tasks = await getAllTasks();

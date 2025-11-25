@@ -205,6 +205,20 @@ io.on("connection", (socket: Socket) => {
 		}
 	);
 
+	socket.on("task:delete", ({ id }: { id: string }) => {
+		const task: Task | undefined = db.prepare("SELECT * FROM tasks WHERE id = @id").get({ id });
+		if (!task) return;
+
+		// delete from DB
+		db.prepare("DELETE FROM tasks WHERE id = @id").run({ id });
+
+		// normalize positions in old column
+		normalizePositions(task.column);
+
+		// broadcast deletion
+		io.emit("task:deleted", { id });
+	});
+
 	socket.on("disconnect", (reason) =>
 		console.log(`Socket disconnected: ${socket.id} reason: ${reason}`)
 	);

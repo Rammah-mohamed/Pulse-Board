@@ -1,3 +1,4 @@
+// client/src/hooks/useSocket.ts
 import { useEffect } from "react";
 import type { Task, ColumnKey } from "@/shared/types";
 import { useBoardStore } from "@/store/boardStore";
@@ -9,6 +10,7 @@ export function useSocket() {
 	const addTaskLocally = useBoardStore((s) => s.addTask);
 	const moveTaskLocally = useBoardStore((s) => s.moveTaskLocally);
 	const updateTaskLocally = useBoardStore((s) => s.updateTaskLocally);
+	const deleteTaskLocally = useBoardStore((s) => s.deleteTask);
 	const applyAuthoritativeTask = useBoardStore((s) => s.applyAuthoritativeTask);
 	const enqueueAction = useBoardStore((s) => s.enqueueAction);
 	const hydrateFromIndexedDB = useBoardStore((s) => s.hydrateFromIndexedDB);
@@ -21,13 +23,23 @@ export function useSocket() {
 			if (persisted?.length) {
 				console.log("[socket] replaying persisted queue:", persisted.length);
 				for (const item of persisted) {
-					if (item.type === "add") socket.emit("task:add", item.task);
-					else if (item.type === "move") socket.emit("task:move", item.payload);
-					else if (item.type === "update")
-						socket.emit("task:update", { id: item.payload.id, ...item.payload.fields });
+					switch (item.type) {
+						case "add":
+							socket.emit("task:add", item.task);
+							break;
+						case "move":
+							socket.emit("task:move", item.payload);
+							break;
+						case "update":
+							socket.emit("task:update", { id: item.payload.id, ...item.payload.fields });
+							break;
+						case "delete":
+							socket.emit("task:delete", { id: item.payload.id });
+							break;
+					}
 				}
 				await clearQueue();
-				flushLocalQueueToMemory(); // reset in-memory queue
+				await flushLocalQueueToMemory(); // reset in-memory mirror
 			}
 		} catch (err) {
 			console.error("[socket] error flushing persisted queue", err);
@@ -43,6 +55,7 @@ export function useSocket() {
 		socket.off("task:added");
 		socket.off("task:moved");
 		socket.off("task:updated");
+		socket.off("task:deleted");
 		socket.off("connect");
 		socket.off("disconnect");
 
@@ -63,6 +76,7 @@ export function useSocket() {
 		socket.on("task:added", (task: Task) => applyAuthoritativeTask(task));
 		socket.on("task:moved", ({ task }: { task: Task }) => applyAuthoritativeTask(task));
 		socket.on("task:updated", ({ task }: { task: Task }) => applyAuthoritativeTask(task));
+		socket.on("task:deleted", ({ id }: { id: string }) => deleteTaskLocally(id));
 
 		// network events
 		const handleOnline = () => {
@@ -81,7 +95,7 @@ export function useSocket() {
 		};
 	}, [setTasks, applyAuthoritativeTask, hydrateFromIndexedDB, flushLocalQueueToMemory]);
 
-	// emitters (offline-first)
+	// --- emitters (offline-first) ---
 	const emitAddTask = async (task: Task) => {
 		addTaskLocally(task);
 		if (socket.connected && navigator.onLine) socket.emit("task:add", task);
@@ -107,5 +121,11 @@ export function useSocket() {
 			} as any);
 	};
 
-	return { emitAddTask, emitMoveTask, emitUpdateTask };
+	const emitDeleteTask = async (id: string) => {
+		deleteTaskLocally(id);
+		if (socket.connected && navigator.onLine) socket.emit("task:delete", { id });
+		else await enqueueAction({ type: "delete", payload: { id } } as any);
+	};
+
+	return { emitAddTask, emitMoveTask, emitUpdateTask, emitDeleteTask };
 }

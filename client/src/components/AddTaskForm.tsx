@@ -16,6 +16,7 @@ import { IconPlus } from "@tabler/icons-react";
 
 export const AddTaskForm: React.FC = () => {
 	const [title, setTitle] = useState("");
+	const [description, setDescription] = useState("");
 	const [column, setColumn] = useState<ColumnKey>("todo");
 
 	const { emitAddTask } = useSocket();
@@ -29,7 +30,7 @@ export const AddTaskForm: React.FC = () => {
 		const newTask = {
 			id: uuidv4(),
 			title: trimmed,
-			description: "",
+			description: description.trim(),
 			column,
 			position: 0,
 			createdAt: new Date().toISOString(),
@@ -37,38 +38,49 @@ export const AddTaskForm: React.FC = () => {
 
 		addTaskLocally(newTask);
 		emitAddTask(newTask);
+
 		setTitle("");
+		setDescription("");
 	};
 
 	return (
 		<form
 			onSubmit={handleSubmit}
-			className="flex flex-col sm:flex-row items-center gap-3 bg-white p-4 rounded-2xl border border-gray-200 shadow-sm"
+			className="flex flex-col gap-3 bg-white p-4 rounded-2xl border border-gray-200 shadow-sm"
 		>
 			<Input
-				placeholder="Enter new task..."
+				placeholder="Enter new task title..."
 				value={title}
 				onChange={(e) => setTitle(e.target.value)}
 				className="flex-1"
 			/>
 
-			<Select value={column} onValueChange={(val: ColumnKey) => setColumn(val)}>
-				<SelectTrigger className="w-40">
-					<SelectValue placeholder="Select column" />
-				</SelectTrigger>
-				<SelectContent>
-					<SelectItem value="todo">To-Do</SelectItem>
-					<SelectItem value="in-progress">In Progress</SelectItem>
-					<SelectItem value="done">Done</SelectItem>
-				</SelectContent>
-			</Select>
+			<textarea
+				placeholder="Enter description (optional)..."
+				value={description}
+				onChange={(e) => setDescription(e.target.value)}
+				className="border border-gray-300 rounded-lg p-2 text-sm min-h-[70px] focus:ring-1 focus:ring-blue-400"
+			/>
 
-			<Button
-				type="submit"
-				className="bg-blue-600 hover:bg-blue-700 text-white flex items-center gap-2"
-			>
-				<IconPlus size={18} /> Add Task
-			</Button>
+			<div className="flex flex-col sm:flex-row items-center gap-3">
+				<Select value={column} onValueChange={(val: ColumnKey) => setColumn(val)}>
+					<SelectTrigger className="w-full sm:w-40">
+						<SelectValue placeholder="Select column" />
+					</SelectTrigger>
+					<SelectContent>
+						<SelectItem value="todo">To-Do</SelectItem>
+						<SelectItem value="in-progress">In Progress</SelectItem>
+						<SelectItem value="done">Done</SelectItem>
+					</SelectContent>
+				</Select>
+
+				<Button
+					type="submit"
+					className="bg-blue-600 hover:bg-blue-700 text-white flex items-center gap-2 w-full sm:w-auto"
+				>
+					<IconPlus size={18} /> Add Task
+				</Button>
+			</div>
 		</form>
 	);
 };

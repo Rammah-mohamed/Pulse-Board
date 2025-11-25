@@ -10,7 +10,8 @@ const QUEUE_STORE = "queue";
 export type QueueItem =
 	| { type: "add"; task: Task }
 	| { type: "move"; payload: { id: string; toColumn: Task["column"]; toPosition: number } }
-	| { type: "update"; payload: { id: string; fields: Partial<Task> } };
+	| { type: "update"; payload: { id: string; fields: Partial<Task> } }
+	| { type: "delete"; payload: { id: string } };
 
 async function getDb() {
 	return openDB(DB_NAME, DB_VERSION, {
@@ -41,6 +42,11 @@ export async function saveTasks(tasks: Task[]) {
 export async function getAllTasks(): Promise<Task[]> {
 	const db = await getDb();
 	return (await db.getAll(TASK_STORE)) as Task[];
+}
+
+export async function deleteTask(id: string) {
+	const db = await getDb();
+	await db.delete(TASK_STORE, id);
 }
 
 export async function clearTasks() {
