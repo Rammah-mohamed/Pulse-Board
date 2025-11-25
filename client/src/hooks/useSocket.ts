@@ -3,7 +3,7 @@ import { useEffect } from "react";
 import type { Task, ColumnKey } from "@/shared/types";
 import { useBoardStore } from "@/store/boardStore";
 import { socket } from "@/lib/socket";
-import { getQueue, clearQueue } from "@/local-db/indexedDB";
+import { getQueue, removeQueueItemByKey } from "@/local-db/indexedDB";
 
 export function useSocket() {
 	const setTasks = useBoardStore((s) => s.setTasks);
@@ -20,9 +20,13 @@ export function useSocket() {
 		try {
 			await flushLocalQueueToMemory();
 			const persisted = await getQueue();
-			if (persisted?.length) {
-				console.log("[socket] replaying persisted queue:", persisted.length);
-				for (const item of persisted) {
+
+			if (!persisted?.length) return;
+
+			console.log("[socket] replaying queue:", persisted.length);
+
+			for (const item of persisted) {
+				try {
 					switch (item.type) {
 						case "add":
 							socket.emit("task:add", item.task);
@@ -31,18 +35,26 @@ export function useSocket() {
 							socket.emit("task:move", item.payload);
 							break;
 						case "update":
-							socket.emit("task:update", { id: item.payload.id, ...item.payload.fields });
+							socket.emit("task:update", {
+								id: item.payload.id,
+								...item.payload.fields,
+							});
 							break;
 						case "delete":
 							socket.emit("task:delete", { id: item.payload.id });
 							break;
 					}
+
+					// IMPORTANT: remove executed queue item
+					await removeQueueItemByKey(item.qid);
+				} catch (err) {
+					console.error("Queue replay error", err);
 				}
-				await clearQueue();
-				await flushLocalQueueToMemory(); // reset in-memory mirror
 			}
+
+			await flushLocalQueueToMemory();
 		} catch (err) {
-			console.error("[socket] error flushing persisted queue", err);
+			console.error("[socket] error flushing queue", err);
 		}
 	};
 

@@ -1,9 +1,8 @@
-// client/src/local-db/indexedDB.ts
 import { openDB } from "idb";
 import type { Task } from "@/shared/types";
 
 const DB_NAME = "pulseboard";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const TASK_STORE = "tasks";
 const QUEUE_STORE = "queue";
 
@@ -26,7 +25,10 @@ async function getDb() {
 	});
 }
 
-// tasks
+/* ──────────────────────────────────────────────
+	TASK STORE
+────────────────────────────────────────────── */
+
 export async function saveTask(task: Task) {
 	const db = await getDb();
 	await db.put(TASK_STORE, task);
@@ -49,29 +51,27 @@ export async function deleteTask(id: string) {
 	await db.delete(TASK_STORE, id);
 }
 
-export async function clearTasks() {
-	const db = await getDb();
-	await db.clear(TASK_STORE);
-}
+/* ──────────────────────────────────────────────
+	QUEUE STORE
+────────────────────────────────────────────── */
 
-// queue
 export async function enqueue(item: QueueItem) {
 	const db = await getDb();
 	await db.add(QUEUE_STORE, item as any);
 }
 
-export async function getQueue(): Promise<QueueItem[]> {
+/** Return queue *with qid exposed* */
+export async function getQueue(): Promise<(QueueItem & { qid: number })[]> {
 	const db = await getDb();
-	// @ts-ignore - items are stored as plain objects
-	return (await db.getAll(QUEUE_STORE)) as QueueItem[];
-}
-
-export async function clearQueue() {
-	const db = await getDb();
-	await db.clear(QUEUE_STORE);
+	return (await db.getAll(QUEUE_STORE)) as any;
 }
 
 export async function removeQueueItemByKey(key: number) {
 	const db = await getDb();
 	await db.delete(QUEUE_STORE, key);
+}
+
+export async function clearQueue() {
+	const db = await getDb();
+	await db.clear(QUEUE_STORE);
 }

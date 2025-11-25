@@ -7,6 +7,7 @@ import {
 	getAllTasks,
 	enqueue as persistEnqueue,
 	getQueue,
+	deleteTask,
 } from "@/local-db/indexedDB";
 
 type QueueItem =
@@ -94,7 +95,10 @@ export const useBoardStore = create<BoardState>((set, _get) => ({
 	deleteTask: (id) =>
 		set((state) => {
 			const tasks = state.tasks.filter((t) => t.id !== id);
-			saveTasks(tasks).catch((e) => console.error("saveTasks error", e));
+
+			// persist deletion
+			deleteTask(id).catch((e) => console.error("deleteTask error", e));
+
 			return { tasks };
 		}),
 
