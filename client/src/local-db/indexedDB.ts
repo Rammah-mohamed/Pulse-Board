@@ -1,8 +1,9 @@
-import { openDB } from "idb";
+import { openDB, type DBSchema } from "idb";
 import type { Task } from "@/shared/types";
 
 const DB_NAME = "pulseboard";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
+
 const TASK_STORE = "tasks";
 const QUEUE_STORE = "queue";
 
@@ -12,14 +13,36 @@ export type QueueItem =
 	| { type: "update"; payload: { id: string; fields: Partial<Task> } }
 	| { type: "delete"; payload: { id: string } };
 
+interface PulseBoardDB extends DBSchema {
+	tasks: {
+		key: string;
+		value: Task;
+	};
+	queue: {
+		key: number;
+		value: QueueItem;
+	};
+}
+
 async function getDb() {
-	return openDB(DB_NAME, DB_VERSION, {
-		upgrade(db) {
-			if (!db.objectStoreNames.contains(TASK_STORE)) {
+	return openDB<PulseBoardDB>(DB_NAME, DB_VERSION, {
+		upgrade(db, oldVersion) {
+			// v1 → initial
+			if (oldVersion < 1) {
 				db.createObjectStore(TASK_STORE, { keyPath: "id" });
 			}
-			if (!db.objectStoreNames.contains(QUEUE_STORE)) {
-				db.createObjectStore(QUEUE_STORE, { keyPath: "qid", autoIncrement: true });
+
+			// v2 → offline queue
+			if (oldVersion < 2) {
+				db.createObjectStore(QUEUE_STORE, {
+					keyPath: "qid",
+					autoIncrement: true,
+				});
+			}
+
+			// v3 → (reserved for future changes)
+			if (oldVersion < 3) {
+				// migrations / indexes go here
 			}
 		},
 	});
@@ -43,7 +66,7 @@ export async function saveTasks(tasks: Task[]) {
 
 export async function getAllTasks(): Promise<Task[]> {
 	const db = await getDb();
-	return (await db.getAll(TASK_STORE)) as Task[];
+	return await db.getAll(TASK_STORE);
 }
 
 export async function deleteTask(id: string) {
@@ -57,10 +80,9 @@ export async function deleteTask(id: string) {
 
 export async function enqueue(item: QueueItem) {
 	const db = await getDb();
-	await db.add(QUEUE_STORE, item as any);
+	await db.add(QUEUE_STORE, item);
 }
 
-/** Return queue *with qid exposed* */
 export async function getQueue(): Promise<(QueueItem & { qid: number })[]> {
 	const db = await getDb();
 	return (await db.getAll(QUEUE_STORE)) as any;

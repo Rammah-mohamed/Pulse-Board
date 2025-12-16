@@ -1,23 +1,26 @@
-import { StrictMode } from "react";
+// client/src/main.tsx
+import React from "react";
 import { createRoot } from "react-dom/client";
-import App from "./App.tsx";
+import App from "./App";
 import "./App.css";
 import { useBoardStore } from "@/store/boardStore";
-import { useSocket } from "@/hooks/useSocket";
 
-// Initialize store & hydrate IndexedDB before app renders
-async function bootstrapStore() {
+async function bootstrap() {
+	// store hydration
 	await useBoardStore.getState().hydrateFromIndexedDB();
+
+	const container = document.getElementById("root");
+	if (!container) {
+		throw new Error("Root container missing in index.html");
+	}
+
+	const root = createRoot(container);
+
+	root.render(
+		<React.StrictMode>
+			<App />
+		</React.StrictMode>
+	);
 }
 
-bootstrapStore().finally(() => {
-	const root = createRoot(document.getElementById("root")!);
-	root.render(
-		<StrictMode>
-			<App />
-		</StrictMode>
-	);
-});
-
-// Initialize socket hooks
-useSocket();
+bootstrap();
