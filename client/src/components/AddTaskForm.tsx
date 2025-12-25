@@ -9,10 +9,11 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@/components/ui/select";
-import type { ColumnKey } from "@/shared/types";
+import type { ColumnKey, Task } from "@/shared/types";
 import { useSocket } from "@/hooks/useSocket";
 import { useBoardStore } from "@/store/boardStore";
 import { IconPlus } from "@tabler/icons-react";
+import { getUserIdFromToken } from "@/helper/token";
 
 export const AddTaskForm: React.FC = () => {
 	const [title, setTitle] = useState("");
@@ -27,8 +28,15 @@ export const AddTaskForm: React.FC = () => {
 		const trimmed = title.trim();
 		if (!trimmed) return;
 
-		const newTask = {
+		const userId = getUserIdFromToken();
+		if (!userId) {
+			console.error("No userId found. Are you logged in?");
+			return;
+		}
+
+		const newTask: Task = {
 			id: uuidv4(),
+			userId, // Added userId
 			title: trimmed,
 			description: description.trim(),
 			column,
@@ -36,9 +44,11 @@ export const AddTaskForm: React.FC = () => {
 			createdAt: new Date().toISOString(),
 		};
 
+		// Add task locally and emit to server
 		addTaskLocally(newTask);
 		emitAddTask(newTask);
 
+		// Reset form
 		setTitle("");
 		setDescription("");
 	};

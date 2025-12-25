@@ -1,14 +1,26 @@
-// server/src/index.ts
 import express from "express";
 import http from "http";
-import { Server as IOServer, Socket } from "socket.io";
+import { Server as IOServer, type Socket } from "socket.io";
 import cors from "cors";
 import Database from "better-sqlite3";
+import bcrypt from "bcrypt";
+import jwt from "jsonwebtoken";
+import crypto from "crypto";
 
+/* ──────────────────────────────────────────────
+	CONFIG
+────────────────────────────────────────────── */
+const PORT = process.env.PORT || 4000;
+const JWT_SECRET = process.env.JWT_SECRET || "supersecret";
+
+/* ──────────────────────────────────────────────
+	TYPES
+────────────────────────────────────────────── */
 type ColumnKey = "todo" | "in-progress" | "done";
 
 export type Task = {
 	id: string;
+	userId: string;
 	title: string;
 	description?: string;
 	column: ColumnKey;
@@ -17,211 +29,349 @@ export type Task = {
 	updatedAt?: string;
 };
 
+interface AuthenticatedSocket extends Socket {
+	userId?: string;
+}
+
+/* ──────────────────────────────────────────────
+	APP + SERVER
+────────────────────────────────────────────── */
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 const server = http.createServer(app);
 const io = new IOServer(server, { cors: { origin: "*" } });
-const PORT = process.env.PORT || 4000;
 
-// --- SQLite setup ---
+/* ──────────────────────────────────────────────
+	DATABASE
+────────────────────────────────────────────── */
 const db = new Database("pulseboard.db");
 
-// Create tasks table
+/* ──────────────────────────────────────────────
+	SCHEMA
+────────────────────────────────────────────── */
 db.prepare(
 	`
-  CREATE TABLE IF NOT EXISTS tasks (
-    id TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    description TEXT,
-    column TEXT NOT NULL,
-    position INTEGER NOT NULL,
-    createdAt TEXT NOT NULL,
-    updatedAt TEXT
-  )
+	CREATE TABLE IF NOT EXISTS users (
+		id TEXT PRIMARY KEY,
+		email TEXT UNIQUE NOT NULL,
+		passwordHash TEXT NOT NULL,
+		createdAt TEXT NOT NULL
+	)
 `
 ).run();
 
-// --- Normalize positions helper ---
-function normalizePositions(column: ColumnKey) {
-	const tasks: Task[] = db
-		.prepare("SELECT * FROM tasks WHERE column = @column ORDER BY position ASC")
-		.all({ column });
+db.prepare(
+	`
+	CREATE TABLE IF NOT EXISTS tasks (
+		id TEXT PRIMARY KEY,
+		userId TEXT NOT NULL,
+		title TEXT NOT NULL,
+		description TEXT,
+		column TEXT NOT NULL,
+		position INTEGER NOT NULL,
+		createdAt TEXT NOT NULL,
+		updatedAt TEXT
+	)
+`
+).run();
 
-	const updateStmt = db.prepare("UPDATE tasks SET position = @position WHERE id = @id");
+/* ──────────────────────────────────────────────
+	AUTH ROUTES
+────────────────────────────────────────────── */
+app.post("/api/auth/register", async (req, res) => {
+	const { email, password } = req.body;
+	if (!email || !password) return res.status(400).json({ message: "Invalid input" });
 
-	tasks.forEach((t, idx) => updateStmt.run({ position: idx, id: t.id }));
-}
+	const userId = crypto.randomUUID();
+	const passwordHash = await bcrypt.hash(password, 10);
 
-// --- Express endpoint ---
-app.get("/api/tasks", (_req, res) => {
-	const tasks: Task[] = db.prepare("SELECT * FROM tasks ORDER BY createdAt ASC").all();
-	res.json(tasks);
+	try {
+		db.prepare(
+			`
+			INSERT INTO users (id, email, passwordHash, createdAt)
+			VALUES (@id, @email, @passwordHash, @createdAt)
+		`
+		).run({
+			id: userId,
+			email,
+			passwordHash,
+			createdAt: new Date().toISOString(),
+		});
+
+		const token = jwt.sign({ userId }, JWT_SECRET, { expiresIn: "7d" });
+		res.json({ token });
+	} catch {
+		res.status(400).json({ message: "Email already exists" });
+	}
 });
 
-// --- Socket.IO ---
-io.on("connection", (socket: Socket) => {
-	console.log("Socket connected:", socket.id);
+app.post("/api/auth/login", async (req, res) => {
+	const { email, password } = req.body;
 
-	// Fetch initial tasks
-	socket.on("tasks:fetch", () => {
-		const tasks: Task[] = db.prepare("SELECT * FROM tasks ORDER BY position ASC").all();
-		socket.emit("tasks:initial", tasks);
+	const user = db.prepare("SELECT * FROM users WHERE email = @email").get({ email }) as any;
+
+	if (!user) return res.status(400).json({ message: "Invalid credentials" });
+
+	const valid = await bcrypt.compare(password, user.passwordHash);
+	if (!valid) return res.status(400).json({ message: "Invalid credentials" });
+
+	const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: "7d" });
+	res.json({ token });
+});
+
+/* ──────────────────────────────────────────────
+	HELPERS
+────────────────────────────────────────────── */
+function normalizeColumn(column: ColumnKey, userId: string) {
+	const rows = db
+		.prepare(
+			`
+		SELECT id FROM tasks
+		WHERE column = @column AND userId = @userId
+		ORDER BY position ASC
+	`
+		)
+		.all({ column, userId }) as { id: string }[];
+
+	const stmt = db.prepare(`
+		UPDATE tasks SET position = @position WHERE id = @id
+	`);
+
+	rows.forEach((r, index) => {
+		stmt.run({ id: r.id, position: index });
+	});
+}
+
+/* ──────────────────────────────────────────────
+	SOCKET AUTH
+────────────────────────────────────────────── */
+io.use((socket, next) => {
+	const token = socket.handshake.auth.token;
+	if (!token) return next(new Error("Missing token"));
+
+	try {
+		const payload = jwt.verify(token, JWT_SECRET) as { userId: string };
+		(socket as AuthenticatedSocket).userId = payload.userId;
+		next();
+	} catch {
+		next(new Error("Invalid token"));
+	}
+});
+
+/* ──────────────────────────────────────────────
+	SOCKET HANDLERS
+────────────────────────────────────────────── */
+io.on("connection", (socket) => {
+	const s = socket as AuthenticatedSocket;
+	if (!s.userId) return socket.disconnect();
+
+	const userId = s.userId;
+	console.log("[socket] connected:", socket.id, "user:", userId);
+
+	/* ───── FETCH ───── */
+	s.on("tasks:fetch", () => {
+		const tasks = db
+			.prepare(
+				`
+			SELECT * FROM tasks
+			WHERE userId = @userId
+			ORDER BY column, position
+		`
+			)
+			.all({ userId }) as Task[];
+
+		s.emit("tasks:initial", tasks);
 	});
 
-	// Add task
-	socket.on("task:add", (payload: Partial<Task> & { id: string }) => {
-		if (!payload.id || !payload.title) {
-			return socket.emit("error", { message: "Invalid task payload" });
+	/* ───── ADD (IDEMPOTENT) ───── */
+	s.on("task:add", (payload: Partial<Task> & { id: string }) => {
+		if (!payload.id || !payload.title) return;
+
+		const existing = db
+			.prepare(
+				`
+			SELECT * FROM tasks
+			WHERE id = @id AND userId = @userId
+		`
+			)
+			.get({ id: payload.id, userId }) as Task | undefined;
+
+		if (existing) {
+			s.emit("task:added", existing);
+			return;
 		}
 
-		const column: ColumnKey = (payload.column as ColumnKey) || "todo";
+		const column: ColumnKey = payload.column || "todo";
 
-		// Calculate new task position
-		const { c: count } = db
-			.prepare("SELECT COUNT(*) as c FROM tasks WHERE column = @column")
-			.get({ column }) as { c: number };
+		const { c } = db
+			.prepare(
+				`
+			SELECT COUNT(*) as c
+			FROM tasks
+			WHERE column = @column AND userId = @userId
+		`
+			)
+			.get({ column, userId }) as { c: number };
 
-		const newTask: Task = {
+		const task: Task = {
 			id: payload.id,
+			userId,
 			title: payload.title,
 			description: payload.description || "",
 			column,
-			position: count,
+			position: c,
 			createdAt: new Date().toISOString(),
 		};
 
 		db.prepare(
-			`INSERT INTO tasks (id, title, description, column, position, createdAt)
-			VALUES (@id, @title, @description, @column, @position, @createdAt)`
-		).run(newTask);
+			`
+			INSERT INTO tasks
+			(id, userId, title, description, column, position, createdAt)
+			VALUES
+			(@id, @userId, @title, @description, @column, @position, @createdAt)
+		`
+		).run(task);
 
-		io.emit("task:added", newTask);
+		s.emit("task:added", task);
 	});
 
-	// Move task
-	socket.on(
-		"task:move",
-		({ id, toColumn, toPosition }: { id: string; toColumn: ColumnKey; toPosition: number }) => {
-			const task: Task | undefined = db.prepare("SELECT * FROM tasks WHERE id = @id").get({ id });
+	/* ───── MOVE (SMOOTH & ATOMIC) ───── */
+	s.on("task:move", ({ id, toColumn, toPosition }) => {
+		const task = db
+			.prepare(
+				`
+			SELECT * FROM tasks
+			WHERE id = @id AND userId = @userId
+		`
+			)
+			.get({ id, userId }) as Task | undefined;
 
-			if (!task) return;
+		if (!task) return;
+		if (task.column === toColumn && task.position === toPosition) return;
 
-			const oldColumn = task.column;
-			const isSameColumn = oldColumn === toColumn;
+		db.prepare(
+			`
+			UPDATE tasks
+			SET position = position - 1
+			WHERE userId = @userId
+			  AND column = @column
+			  AND position > @position
+		`
+		).run({
+			userId,
+			column: task.column,
+			position: task.position,
+		});
 
-			// --- 1. Remove the task from its old column list ---
-			const oldColumnTasks: Task[] = db
-				.prepare("SELECT * FROM tasks WHERE column = @column ORDER BY position ASC")
-				.all({ column: oldColumn });
+		db.prepare(
+			`
+			UPDATE tasks
+			SET position = position + 1
+			WHERE userId = @userId
+			  AND column = @column
+			  AND position >= @position
+		`
+		).run({
+			userId,
+			column: toColumn,
+			position: toPosition,
+		});
 
-			const filteredOld = oldColumnTasks.filter((t) => t.id !== id);
+		const updatedAt = new Date().toISOString();
 
-			// --- 2. If moving within same column ---
-			if (isSameColumn) {
-				// Insert the task at the new index
-				const safeIndex = Math.max(0, Math.min(toPosition, filteredOld.length));
-				filteredOld.splice(safeIndex, 0, task);
+		db.prepare(
+			`
+			UPDATE tasks
+			SET column = @column,
+			    position = @position,
+			    updatedAt = @updatedAt
+			WHERE id = @id
+		`
+		).run({
+			id,
+			column: toColumn,
+			position: toPosition,
+			updatedAt,
+		});
 
-				// Rewrite ALL positions in this column correctly
-				const updateStmt = db.prepare("UPDATE tasks SET position = @position WHERE id = @id");
+		s.emit("task:moved", {
+			task: { ...task, column: toColumn, position: toPosition, updatedAt },
+		});
+	});
 
-				filteredOld.forEach((t, idx) => updateStmt.run({ position: idx, id: t.id }));
+	/* ───── UPDATE (FIXED PAYLOAD) ───── */
+	s.on("task:update", ({ id, title, description }) => {
+		const task = db
+			.prepare(
+				`
+			SELECT * FROM tasks
+			WHERE id = @id AND userId = @userId
+		`
+			)
+			.get({ id, userId }) as Task | undefined;
 
-				// Update metadata
-				task.position = safeIndex;
-				task.updatedAt = new Date().toISOString();
-
-				db.prepare("UPDATE tasks SET updatedAt = @updatedAt WHERE id = @id").run({
-					updatedAt: task.updatedAt,
-					id,
-				});
-
-				return io.emit("task:moved", { task });
-			}
-
-			// --- 3. If moving to a *different* column ---
-			// Normalize old column after removal
-			const updateOld = db.prepare("UPDATE tasks SET position = @position WHERE id = @id");
-			filteredOld.forEach((t, idx) => updateOld.run({ position: idx, id: t.id }));
-
-			// Fetch tasks in the new column
-			const newColumnTasks: Task[] = db
-				.prepare("SELECT * FROM tasks WHERE column = @column ORDER BY position ASC")
-				.all({ column: toColumn });
-
-			const safeIndex = Math.max(0, Math.min(toPosition, newColumnTasks.length));
-			newColumnTasks.splice(safeIndex, 0, task);
-
-			// Rewrite the target column
-			const updateNew = db.prepare(
-				"UPDATE tasks SET column = @column, position = @position WHERE id = @id"
-			);
-
-			newColumnTasks.forEach((t, idx) =>
-				updateNew.run({ column: toColumn, position: idx, id: t.id })
-			);
-
-			// Update metadata
-			task.column = toColumn;
-			task.position = safeIndex;
-			task.updatedAt = new Date().toISOString();
-
-			db.prepare(
-				"UPDATE tasks SET column = @column, position = @position, updatedAt = @updatedAt WHERE id = @id"
-			).run({
-				column: task.column,
-				position: task.position,
-				updatedAt: task.updatedAt,
-				id: task.id,
-			});
-
-			return io.emit("task:moved", { task });
-		}
-	);
-
-	// Update task
-	socket.on(
-		"task:update",
-		({ id, title, description }: { id: string; title?: string; description?: string }) => {
-			const task: Task | undefined = db.prepare("SELECT * FROM tasks WHERE id = @id").get({ id });
-			if (!task) return;
-
-			if (title) task.title = title;
-			if (description) task.description = description;
-			task.updatedAt = new Date().toISOString();
-
-			db.prepare(
-				"UPDATE tasks SET title = @title, description = @description, updatedAt = @updatedAt WHERE id = @id"
-			).run({
-				title: task.title,
-				description: task.description,
-				updatedAt: task.updatedAt,
-				id: task.id,
-			});
-
-			io.emit("task:updated", { task });
-		}
-	);
-
-	socket.on("task:delete", ({ id }: { id: string }) => {
-		const task: Task | undefined = db.prepare("SELECT * FROM tasks WHERE id = @id").get({ id });
 		if (!task) return;
 
-		// delete from DB
-		db.prepare("DELETE FROM tasks WHERE id = @id").run({ id });
+		const updatedAt = new Date().toISOString();
 
-		// normalize positions in old column
-		normalizePositions(task.column);
+		db.prepare(
+			`
+			UPDATE tasks
+			SET title = @title,
+			    description = @description,
+			    updatedAt = @updatedAt
+			WHERE id = @id
+		`
+		).run({
+			id,
+			title: title ?? task.title,
+			description: description ?? task.description,
+			updatedAt,
+		});
 
-		// broadcast deletion
-		io.emit("task:deleted", { id });
+		// 🔧 FIX: wrap in { task }
+		s.emit("task:updated", {
+			task: {
+				...task,
+				title: title ?? task.title,
+				description: description ?? task.description,
+				updatedAt,
+			},
+		});
 	});
 
-	socket.on("disconnect", (reason) =>
-		console.log(`Socket disconnected: ${socket.id} reason: ${reason}`)
-	);
+	/* ───── DELETE (IDEMPOTENT) ───── */
+	s.on("task:delete", ({ id }) => {
+		const task = db
+			.prepare(
+				`
+			SELECT * FROM tasks
+			WHERE id = @id AND userId = @userId
+		`
+			)
+			.get({ id, userId }) as Task | undefined;
+
+		if (!task) {
+			s.emit("task:deleted", { id });
+			return;
+		}
+
+		db.prepare("DELETE FROM tasks WHERE id = @id").run({ id });
+		normalizeColumn(task.column, userId);
+
+		s.emit("task:deleted", { id });
+	});
+
+	s.on("disconnect", () => {
+		console.log("[socket] disconnected:", socket.id);
+	});
 });
 
-server.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+/* ──────────────────────────────────────────────
+	START
+────────────────────────────────────────────── */
+server.listen(PORT, () => {
+	console.log(`🚀 Server listening on port ${PORT}`);
+});

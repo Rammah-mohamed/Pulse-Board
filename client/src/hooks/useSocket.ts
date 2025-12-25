@@ -1,142 +1,154 @@
 // client/src/hooks/useSocket.ts
-import { useEffect } from "react";
+import { useEffect, useRef, useCallback } from "react";
+import { io, type Socket } from "socket.io-client";
 import type { Task, ColumnKey } from "@/shared/types";
 import { useBoardStore } from "@/store/boardStore";
-import { socket } from "@/lib/socket";
-import { getQueue, removeQueueItemByKey } from "@/local-db/indexedDB";
+import { getQueueByUser, removeQueueItem } from "@/local-db/indexedDB";
+import { getUserIdFromToken } from "@/helper/token";
 
-export function useSocket() {
-	const setTasks = useBoardStore((s) => s.setTasks);
-	const addTaskLocally = useBoardStore((s) => s.addTask);
-	const moveTaskLocally = useBoardStore((s) => s.moveTaskLocally);
-	const updateTaskLocally = useBoardStore((s) => s.updateTaskLocally);
-	const deleteTaskLocally = useBoardStore((s) => s.deleteTask);
-	const applyAuthoritativeTask = useBoardStore((s) => s.applyAuthoritativeTask);
-	const enqueueAction = useBoardStore((s) => s.enqueueAction);
-	const hydrateFromIndexedDB = useBoardStore((s) => s.hydrateFromIndexedDB);
-	const flushLocalQueueToMemory = useBoardStore((s) => s.flushLocalQueueToMemory);
+type Emitters = {
+	emitAddTask: (task: Task) => Promise<void>;
+	emitMoveTask: (payload: { id: string; toColumn: ColumnKey; toPosition: number }) => Promise<void>;
+	emitUpdateTask: (payload: { id: string; title?: string; description?: string }) => Promise<void>;
+	emitDeleteTask: (id: string) => Promise<void>;
+};
 
-	const flushPersistedQueueAndClear = async () => {
-		try {
-			await flushLocalQueueToMemory();
-			const persisted = await getQueue();
+export function useSocket(): Emitters {
+	const socketRef = useRef<Socket | null>(null);
 
-			if (!persisted?.length) return;
+	const { setTasks, applyAuthoritativeTask, deleteTaskLocally, enqueue, hydrateFromIndexedDB } =
+		useBoardStore.getState();
 
-			console.log("[socket] replaying queue:", persisted.length);
+	const userId = getUserIdFromToken();
+	const token = localStorage.getItem("token");
 
-			for (const item of persisted) {
-				try {
-					switch (item.type) {
-						case "add":
-							socket.emit("task:add", item.task);
-							break;
-						case "move":
-							socket.emit("task:move", item.payload);
-							break;
-						case "update":
-							socket.emit("task:update", {
-								id: item.payload.id,
-								...item.payload.fields,
-							});
-							break;
-						case "delete":
-							socket.emit("task:delete", { id: item.payload.id });
-							break;
-					}
+	// ---------------------------------------------------
+	// OFFLINE QUEUE REPLAY
+	// ---------------------------------------------------
+	const flushQueue = useCallback(async () => {
+		if (!userId || !socketRef.current) return;
 
-					// IMPORTANT: remove executed queue item
-					await removeQueueItemByKey(item.qid);
-				} catch (err) {
-					console.error("Queue replay error", err);
+		const queue = await getQueueByUser(userId);
+		if (!queue.length) return;
+
+		console.log(`[socket] Replaying ${queue.length} queued actions`);
+
+		for (const item of queue) {
+			try {
+				switch (item.type) {
+					case "add":
+						socketRef.current.emit("task:add", item.task);
+						break;
+					case "move":
+						socketRef.current.emit("task:move", item.payload);
+						break;
+					case "update":
+						socketRef.current.emit("task:update", {
+							id: item.payload.id,
+							...item.payload.fields,
+						});
+						break;
+					case "delete":
+						socketRef.current.emit("task:delete", { id: item.payload.id });
+						break;
 				}
+				await removeQueueItem(item.qid!);
+			} catch (err) {
+				console.error("[socket] queue replay error", err);
+				break;
 			}
-
-			await flushLocalQueueToMemory();
-		} catch (err) {
-			console.error("[socket] error flushing queue", err);
 		}
-	};
+	}, [userId]);
 
+	// ---------------------------------------------------
+	// SOCKET LIFECYCLE (TOKEN-DRIVEN)
+	// ---------------------------------------------------
 	useEffect(() => {
-		// hydrate local cache for offline-first
-		hydrateFromIndexedDB().catch((e) => console.error("hydrate error", e));
+		hydrateFromIndexedDB().catch(console.error);
 
-		// remove old listeners
-		socket.off("tasks:initial");
-		socket.off("task:added");
-		socket.off("task:moved");
-		socket.off("task:updated");
-		socket.off("task:deleted");
-		socket.off("connect");
-		socket.off("disconnect");
+		// 🔴 LOGGED OUT → HARD TEARDOWN
+		if (!token || !userId) {
+			if (socketRef.current) {
+				socketRef.current.disconnect();
+				socketRef.current = null;
+			}
+			return;
+		}
 
-		// socket listeners
+		const socket = io("http://localhost:4000", {
+			auth: { token },
+			autoConnect: false,
+		});
+
+		socketRef.current = socket;
+
 		socket.on("connect", async () => {
-			console.log("[socket] connected:", socket.id);
-			await flushPersistedQueueAndClear();
+			console.log("[socket] connected", socket.id);
+			await flushQueue();
 			socket.emit("tasks:fetch");
 		});
 
-		socket.on("disconnect", (reason) => console.log("[socket] disconnected:", reason));
-
-		socket.on("tasks:initial", (tasks: Task[]) => {
-			console.log("[socket] tasks:initial received", tasks.length);
-			setTasks(tasks);
+		socket.on("disconnect", (reason) => {
+			console.log("[socket] disconnected:", reason);
 		});
 
+		// -------- SERVER → CLIENT (AUTHORITATIVE) --------
+		socket.on("tasks:initial", (tasks: Task[]) => setTasks(tasks));
 		socket.on("task:added", (task: Task) => applyAuthoritativeTask(task));
 		socket.on("task:moved", ({ task }: { task: Task }) => applyAuthoritativeTask(task));
 		socket.on("task:updated", ({ task }: { task: Task }) => applyAuthoritativeTask(task));
 		socket.on("task:deleted", ({ id }: { id: string }) => deleteTaskLocally(id));
 
-		// network events
-		const handleOnline = () => {
-			console.log("[network] online — attempting queue flush");
-			if (socket.connected) flushPersistedQueueAndClear();
+		const handleOnline = async () => {
+			if (socket.connected) await flushQueue();
 			else socket.connect();
 		};
-		const handleOffline = () => console.log("[network] offline — changes will queue");
 
 		window.addEventListener("online", handleOnline);
-		window.addEventListener("offline", handleOffline);
+		socket.connect();
 
 		return () => {
 			window.removeEventListener("online", handleOnline);
-			window.removeEventListener("offline", handleOffline);
+			socket.disconnect();
+			socketRef.current = null;
 		};
-	}, [setTasks, applyAuthoritativeTask, hydrateFromIndexedDB, flushLocalQueueToMemory]);
+	}, [token, userId, flushQueue]);
 
-	// --- emitters (offline-first) ---
+	// ---------------------------------------------------
+	// EMITTERS (OFFLINE-FIRST)
+	// ---------------------------------------------------
 	const emitAddTask = async (task: Task) => {
-		addTaskLocally(task);
-		if (socket.connected && navigator.onLine) socket.emit("task:add", task);
-		else await enqueueAction({ type: "add", task } as any);
+		if (socketRef.current?.connected && navigator.onLine) socketRef.current.emit("task:add", task);
+		else if (userId) await enqueue({ type: "add", userId, task });
 	};
 
 	const emitMoveTask = async (payload: { id: string; toColumn: ColumnKey; toPosition: number }) => {
-		moveTaskLocally(payload.id, payload.toColumn, payload.toPosition);
-		if (socket.connected && navigator.onLine) socket.emit("task:move", payload);
-		else await enqueueAction({ type: "move", payload } as any);
+		if (socketRef.current?.connected && navigator.onLine)
+			socketRef.current.emit("task:move", payload);
+		else if (userId) await enqueue({ type: "move", userId, payload });
 	};
 
 	const emitUpdateTask = async (payload: { id: string; title?: string; description?: string }) => {
-		updateTaskLocally(payload.id, { title: payload.title, description: payload.description });
-		if (socket.connected && navigator.onLine) socket.emit("task:update", payload);
-		else
-			await enqueueAction({
+		if (socketRef.current?.connected && navigator.onLine)
+			socketRef.current.emit("task:update", payload);
+		else if (userId)
+			await enqueue({
 				type: "update",
+				userId,
 				payload: {
 					id: payload.id,
 					fields: { title: payload.title, description: payload.description },
 				},
-			} as any);
+			});
 	};
 
 	const emitDeleteTask = async (id: string) => {
+		// optimistic UI
 		deleteTaskLocally(id);
-		if (socket.connected && navigator.onLine) socket.emit("task:delete", { id });
-		else await enqueueAction({ type: "delete", payload: { id } } as any);
+
+		if (socketRef.current?.connected && navigator.onLine)
+			socketRef.current.emit("task:delete", { id });
+		else if (userId) await enqueue({ type: "delete", userId, payload: { id } });
 	};
 
 	return { emitAddTask, emitMoveTask, emitUpdateTask, emitDeleteTask };

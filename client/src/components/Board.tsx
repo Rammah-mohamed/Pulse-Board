@@ -15,6 +15,7 @@ export default function Board() {
 	const moveTaskLocally = useBoardStore((s) => s.moveTaskLocally);
 	const { emitMoveTask } = useSocket();
 
+	// Group tasks by column and sort by position
 	const tasksByColumn = (column: ColumnKey) =>
 		tasks.filter((t) => t.column === column).sort((a, b) => a.position - b.position);
 
@@ -27,11 +28,11 @@ export default function Board() {
 		const toColumn = destination.droppableId as ColumnKey;
 		const toPosition = destination.index;
 
-		// Optimistic local update
+		// Update local state optimistically
 		moveTaskLocally(draggableId, toColumn, toPosition);
 
-		// Emit to server
-		emitMoveTask({ id: draggableId, toColumn, toPosition });
+		// Emit to server (offline-first will queue if disconnected)
+		emitMoveTask?.({ id: draggableId, toColumn, toPosition });
 	};
 
 	return (
